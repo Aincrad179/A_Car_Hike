@@ -1,71 +1,88 @@
 using UnityEngine;
 
 /// <summary>
-/// 将 BlazePose 提取的手腕高度差转换为赛车转向数值 (-1 到 1)
+/// 将 BlazePose 提取的双手连线角度转换为赛车转向数值 (-1 到 1)，
+/// 同时根据双手距离计算开关式油门/刹车数值（合拢加速，张开减速）。
 /// </summary>
 public class PoseSteeringManager : MonoBehaviour
 {
     [Header("输入源")]
     public BlazePoseWristTracker tracker; 
 
-    [Header("转向配置")]
-    [Tooltip("手腕高度差达到多少时判定为 100% 转向")]
-    public float sensitivity = 0.25f; 
+    [Header("转向配置 (基于角度)")]
+    [Tooltip("当双手连线倾斜达到此角度时，判定为 100% 转向")]
+    public float maxSteeringAngle = 45f; 
     
-    [Tooltip("忽略微小动作的死区范围")]
-    public float deadZone = 0.03f;
+    [Tooltip("忽略微小倾斜的死区角度")]
+    public float deadZoneAngle = 5f;
 
-    [Tooltip("数值平滑速度 (越小越平滑，但也越有延迟感)")]
+    [Tooltip("数值平滑速度")]
     public float smoothSpeed = 10f;
+
+    [Header("油门/速度控制配置")]
+    [Tooltip("双手距离的阈值：小于此值加速，大于此值减速")]
+    public float centerDistance = 0.4f;
 
     [Header("输出状态 (只读)")]
     [Range(-1f, 1f)]
-    public float steeringValue; // 最终输出给赛车的数值
+    public float steeringValue; 
+    [Range(-1f, 1f)]
+    public float throttleValue;
 
     [Header("调试信息")]
     public bool isHandsDetected;
-    public float rawDifference; // 原始高度差
+    public float currentAngle; // 当前双手连线的角度
+    public float currentHandDistance; // 当前双手直线距离
 
     private float _targetSteering;
+    private float _targetThrottle;
 
     void Update()
     {
-        // 1. 检查是否检测到双手 (置信度阈值建议 0.5)
         isHandsDetected = tracker != null && 
                           tracker.leftWristScore > 0.5f && 
                           tracker.rightWristScore > 0.5f;
 
         if (!isHandsDetected)
         {
-            // 如果没检测到手，目标设为 0 (自动回正)
             _targetSteering = 0f;
+            _targetThrottle = 0f;
         }
         else
         {
-            // 2. 计算高度差
-            // 由于摄像头通常是镜像的，且在 BlazePose 中 y 轴向下，
-            // 我们通过 (左手y - 右手y) 来实现镜像后的直觉转向：
-            // 玩家左手下压 -> 左手 y 变大 -> 得到正值 -> 向右转 (镜像视觉)
-            rawDifference = tracker.leftWrist.y - tracker.rightWrist.y;
+            // 1. 转向逻辑 (基于角度机制)
+            Vector2 handVector = (Vector2)tracker.leftWrist - (Vector2)tracker.rightWrist;
+            currentAngle = Mathf.Atan2(handVector.y, handVector.x) * Mathf.Rad2Deg;
 
-            // 3. 应用死区处理
-            if (Mathf.Abs(rawDifference) < deadZone)
+            if (Mathf.Abs(currentAngle) < deadZoneAngle)
             {
                 _targetSteering = 0f;
             }
             else
             {
-                // 4. 映射到 -1 到 1 之间，并限制范围
-                // 除以灵敏度，例如差值 0.25 达到满打方向盘
-                _targetSteering = Mathf.Clamp(rawDifference / sensitivity, -1f, 1f);
+                _targetSteering = Mathf.Clamp(currentAngle / maxSteeringAngle, -1f, 1f);
+            }
+
+            // 2. 油门/加速减速逻辑 (开关式控制：合拢加速，张开减速)
+            currentHandDistance = Vector3.Distance(tracker.leftWrist, tracker.rightWrist);
+            
+            if (currentHandDistance < centerDistance)
+            {
+                // 距离小于阈值：合拢加速
+                _targetThrottle = 1f;
+            }
+            else
+            {
+                // 距离大于阈值：张开减速
+                _targetThrottle = -1f;
             }
         }
 
-        // 5. 平滑处理 (Lerp)，消除摄像头画面跳动带来的“打摆子”现象
+        // 3. 平滑处理
         steeringValue = Mathf.Lerp(steeringValue, _targetSteering, Time.deltaTime * smoothSpeed);
+        throttleValue = Mathf.Lerp(throttleValue, _targetThrottle, Time.deltaTime * smoothSpeed);
     }
 
-    // 在屏幕上画一个简单的状态显示，方便调试
     void OnGUI()
     {
         GUIStyle style = new GUIStyle();
@@ -78,9 +95,13 @@ public class PoseSteeringManager : MonoBehaviour
         }
         else if (Application.isPlaying)
         {
-            GUI.Label(new Rect(20, 20, 300, 30), $"当前转向强度: {steeringValue:F2}", style);
-            // 画一个简单的进度条预览
-            GUI.HorizontalSlider(new Rect(20, 60, 200, 30), steeringValue, -1f, 1f);
+            GUI.Label(new Rect(20, 20, 300, 30), $"当前角度: {currentAngle:F1}°", style);
+            GUI.HorizontalSlider(new Rect(20, 50, 200, 30), steeringValue, -1f, 1f);
+
+            GUI.Label(new Rect(20, 90, 300, 30), $"油门状态: {(throttleValue > 0 ? "加速" : "刹车")}", style);
+            GUI.HorizontalSlider(new Rect(20, 120, 200, 30), throttleValue, -1f, 1f);
+            
+            GUI.Label(new Rect(20, 150, 300, 30), $"双手距离: {currentHandDistance:F2}", style);
         }
     }
 }
